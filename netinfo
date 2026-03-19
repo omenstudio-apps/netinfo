@@ -78,7 +78,6 @@ trim_value() {
 
   cols=$(tput cols)
   max=$((cols - 33))
-
   [ "$max" -lt 10 ] && max=10
 
   if [ "${#value}" -gt "$max" ]; then
@@ -121,19 +120,17 @@ load_active_interface() {
       active_dev="$dev"
       active_ip="$ip"
 
-      # get ipv6 (ignore link-local)
+      # get ipv6 and ignore link-local
       active_ipv6=$(ifconfig "$dev" 2>/dev/null | awk '/inet6 / && $2 !~ /^fe80:/ {print $2; exit}')
 
       # get mac address
       active_mac=$(ifconfig "$dev" 2>/dev/null | awk '/ether / {print $2; exit}')
 
-      # subnet mask from dhcp
+      # get subnet mask and gateway
       active_mask=$(/usr/sbin/ipconfig getoption "$dev" subnet_mask 2>/dev/null)
-
-      # default gateway
       active_router=$(/usr/sbin/ipconfig getoption "$dev" router 2>/dev/null)
 
-      # dns servers
+      # get dns servers
       dns_raw=$(/usr/sbin/networksetup -getdnsservers "$port" 2>/dev/null)
       if echo "$dns_raw" | grep -q "^There"; then
         active_dns="(none explicitly set)"
@@ -141,7 +138,7 @@ load_active_interface() {
         active_dns=$(echo "$dns_raw" | paste -sd " " -)
       fi
 
-      # dhcp info
+      # get dhcp info
       dhcp_packet=$(/usr/sbin/ipconfig getpacket "$dev" 2>/dev/null)
       if [ -n "$dhcp_packet" ]; then
         active_dhcp_enabled="Yes"
@@ -176,20 +173,62 @@ draw_active_interface() {
     echo
 
     # network details
-    format_line "IPv4 Address" "${active_ip:-N/A}"         # local ip
-    format_line "Subnet Mask" "${active_mask:-N/A}"        # network range
-    format_line "Default Gateway" "${active_router:-N/A}"  # router ip
-    format_line "DNS Servers" "${active_dns:-N/A}"         # name resolution
-    format_line "MAC Address" "${active_mac:-N/A}"         # hardware id
-    format_line "IPv6 Address" "${active_ipv6:-N/A}"       # ipv6 address
-    format_line "DHCP Enabled" "${active_dhcp_enabled:-N/A}" # auto config
-    format_line "DHCP Server" "${active_dhcp_server:-N/A}" # dhcp source
+    format_line "IPv4 Address" "${active_ip:-N/A}"
+    format_line "Subnet Mask" "${active_mask:-N/A}"
+    format_line "Default Gateway" "${active_router:-N/A}"
+    format_line "DNS Servers" "${active_dns:-N/A}"
+    format_line "MAC Address" "${active_mac:-N/A}"
+    format_line "IPv6 Address" "${active_ipv6:-N/A}"
+    format_line "DHCP Enabled" "${active_dhcp_enabled:-N/A}"
+    format_line "DHCP Server" "${active_dhcp_server:-N/A}"
     echo
   else
     echo
     echo "${white}No active interfaces detected${reset}"
     echo
   fi
+}
+
+# shows inactive interfaces
+draw_inactive_ports() {
+  clear
+  draw_header
+  echo
+
+  found=0
+  while IFS="|" read -r port dev; do
+    [ -z "$dev" ] && continue
+
+    ip=$(/usr/sbin/ipconfig getifaddr "$dev" 2>/dev/null)
+    if [ -z "$ip" ]; then
+      found=1
+      echo "${white}${port} (${dev})${reset}"
+      format_line "IP Address" "None"
+      format_line "Subnet Mask" "N/A"
+      format_line "Gateway" "N/A"
+      format_line "DNS Servers" "N/A"
+      echo
+    fi
+  done < <(
+    /usr/sbin/networksetup -listallhardwareports | awk '
+      /Hardware Port:/ {
+        port = $0
+        sub("Hardware Port: ", "", port)
+      }
+      /Device:/ {
+        dev = $2
+        print port "|" dev
+      }
+    '
+  )
+
+  if [ "$found" -eq 0 ]; then
+    echo "${white}No inactive ports found${reset}"
+  fi
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
 }
 
 draw_menu() {
@@ -241,6 +280,59 @@ update_menu_selection() {
   printf "%b" "${pink}> ${items_ref[$new_selected]}${reset}"
 }
 
+# runs speed test
+run_speedtest() {
+  clear
+  draw_header
+  echo
+
+  if ping -c 2 1.1.1.1 >/dev/null 2>&1; then
+    ping_ms=$(ping -c 4 1.1.1.1 2>/dev/null | awk -F'/' 'END { print $5 " ms" }')
+
+    tmpfile=$(mktemp)
+    networkQuality > "$tmpfile" 2>/dev/null &
+    pid=$!
+
+    frames=("▰▱▱▱▱▱" "▰▰▱▱▱▱" "▰▰▰▱▱▱" "▰▰▰▰▱▱" "▰▰▰▰▰▱" "▰▰▰▰▰▰")
+    i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+      printf "\r${pink}%s${reset} ${white}Running speed test...${reset}" "${frames[$i]}"
+      i=$(( (i + 1) % ${#frames[@]} ))
+      sleep 0.15
+    done
+
+    wait "$pid"
+    echo
+    echo
+
+    nq=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    dl=$(echo "$nq" | awk -F': ' '
+      /Downlink capacity|Download capacity|Downlink throughput|Download throughput/ {
+        print $2
+        exit
+      }')
+
+    ul=$(echo "$nq" | awk -F': ' '
+      /Uplink capacity|Upload capacity|Uplink throughput|Upload throughput/ {
+        print $2
+        exit
+      }')
+
+    echo "${white}Ping            : ${ping_ms:-N/A}${reset}"
+    echo "${white}Download Speed  : ${dl:-N/A}${reset}"
+    echo "${white}Upload Speed    : ${ul:-N/A}${reset}"
+  else
+    echo "${white}Can't run speed test without internet ya dummy!${reset}"
+  fi
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
 # flushes dns cache
 tool_flush_dns() {
   clear
@@ -251,6 +343,12 @@ tool_flush_dns() {
 
   sudo dscacheutil -flushcache
   sudo killall -HUP mDNSResponder
+
+  if [ $? -eq 0 ]; then
+    echo "${white}DNS cache flushed successfully.${reset}"
+  else
+    echo "${white}Could not flush DNS cache.${reset}"
+  fi
 
   echo
   echo "${dim}Press any key to go back${reset}"
@@ -266,14 +364,27 @@ tool_renew_dhcp() {
   echo
 
   load_active_interface
-  sudo ipconfig set "$active_dev" DHCP
+
+  if [ -z "$active_dev" ]; then
+    echo "${white}No active interface found.${reset}"
+  else
+    echo "${white}Renewing DHCP on ${active_name} (${active_dev})...${reset}"
+    echo
+    sudo ipconfig set "$active_dev" DHCP
+
+    if [ $? -eq 0 ]; then
+      echo "${white}DHCP lease renewed successfully.${reset}"
+    else
+      echo "${white}Could not renew DHCP lease.${reset}"
+    fi
+  fi
 
   echo
   echo "${dim}Press any key to go back${reset}"
   read -rsn1
 }
 
-# gets public ip from internet
+# gets public ip
 tool_show_public_ip() {
   clear
   draw_header
@@ -281,7 +392,14 @@ tool_show_public_ip() {
   echo "${purple}${bold}Show Public IP${reset}"
   echo
 
-  curl -s ifconfig.me
+  public_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null)
+  [ -z "$public_ip" ] && public_ip=$(curl -s --max-time 5 icanhazip.com 2>/dev/null)
+
+  if [ -n "$public_ip" ]; then
+    echo "${white}Public IP Address : ${public_ip}${reset}"
+  else
+    echo "${white}Could not determine public IP.${reset}"
+  fi
 
   echo
   echo "${dim}Press any key to go back${reset}"
@@ -297,6 +415,17 @@ tool_ping_gateway() {
   echo
 
   load_active_interface
+
+  if [ -z "$active_router" ]; then
+    echo "${white}No default gateway found.${reset}"
+    echo
+    echo "${dim}Press any key to go back${reset}"
+    read -rsn1
+    return
+  fi
+
+  echo "${white}Pinging ${active_router}...${reset}"
+  echo
   ping -c 4 "$active_router"
 
   echo
@@ -311,13 +440,53 @@ tool_reset_network() {
   echo
   echo "${purple}${bold}Reset Network Settings${reset}"
   echo
+  echo "${white}Are you sure?${reset}"
+  echo
+  echo "${white}This will:${reset}"
+  echo "${white}- Flush DNS cache${reset}"
+  echo "${white}- Renew DHCP on the active interface${reset}"
+  echo "${white}- Briefly restart that interface${reset}"
+  echo
+  echo "${white}Your network connection may drop for a few seconds.${reset}"
+  echo
+  echo "${pink}Press Y to continue or any other key to cancel.${reset}"
+
+  read -rsn1 confirm
+
+  if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
+    return
+  fi
+
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Reset Network Settings${reset}"
+  echo
 
   load_active_interface
 
+  if [ -z "$active_dev" ]; then
+    echo "${white}No active interface found.${reset}"
+    echo
+    echo "${dim}Press any key to go back${reset}"
+    read -rsn1
+    return
+  fi
+
+  echo "${white}Flushing DNS cache...${reset}"
   sudo dscacheutil -flushcache
   sudo killall -HUP mDNSResponder
+
+  echo "${white}Renewing DHCP on ${active_name} (${active_dev})...${reset}"
   sudo ipconfig set "$active_dev" DHCP
 
+  echo "${white}Restarting ${active_name} (${active_dev})...${reset}"
+  sudo ifconfig "$active_dev" down
+  sleep 2
+  sudo ifconfig "$active_dev" up
+
+  echo
+  echo "${white}Basic network reset complete.${reset}"
   echo
   echo "${dim}Press any key to go back${reset}"
   read -rsn1
@@ -337,7 +506,9 @@ read_key() {
     $'\n'|$'\r'|'')
       echo enter
       ;;
-    [1-6]) echo "$key" ;;
+    [1-6])
+      echo "$key"
+      ;;
   esac
 }
 
@@ -440,10 +611,21 @@ main_loop() {
         ;;
       enter)
         case "$selected" in
-          0) draw_inactive_ports; redraw_home ;;
-          1) run_speedtest; redraw_home ;;
-          2) tools_loop; redraw_home ;;
-          3) break ;;
+          0)
+            draw_inactive_ports
+            redraw_home
+            ;;
+          1)
+            run_speedtest
+            redraw_home
+            ;;
+          2)
+            tools_loop
+            redraw_home
+            ;;
+          3)
+            break
+            ;;
         esac
         ;;
       1)
