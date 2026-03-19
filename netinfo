@@ -1,0 +1,469 @@
+#!/bin/bash
+
+PATH="/usr/local/bin:/opt/homebrew/bin:/usr/sbin:/sbin:/usr/bin:/bin"
+
+# colors
+reset=$'\033[0m'
+bold=$'\033[1m'
+
+white=$'\033[38;2;255;255;255m'
+pink=$'\033[38;2;255;105;235m'
+purple=$'\033[38;2;170;110;255m'
+cyan=$'\033[38;2;90;255;220m'
+dim=$'\033[38;2;120;120;120m'
+
+selected=0
+
+main_menu_items=(
+  "1. View Inactive Ports"
+  "2. Run Speed Test"
+  "3. Tools"
+  "4. Quit"
+)
+
+tools_menu_items=(
+  "1. Flush DNS"
+  "2. Renew DHCP"
+  "3. Show Public IP"
+  "4. Ping Default Gateway"
+  "5. Reset Network Settings"
+  "6. Back"
+)
+
+# active interface data
+active_name=""
+active_dev=""
+active_ip=""
+active_ipv6=""
+active_mac=""
+active_mask=""
+active_router=""
+active_dns=""
+active_dhcp_enabled=""
+active_dhcp_server=""
+
+cleanup() {
+  tput sgr0
+  tput cnorm
+  tput rmcup
+  stty sane 2>/dev/null
+}
+
+init_ui() {
+  tput smcup
+  tput civis
+  stty -echo -icanon min 1 time 0 2>/dev/null
+  trap cleanup EXIT INT TERM
+}
+
+draw_header() {
+  clear
+  printf "%s" "$pink"
+  cat <<'EOF'
+ _   _      _   _____        __       
+| \ | | ___| |_|_   _|_ __  / _| ___  
+|  \| |/ _ \ __| | | | '_ \| |_ / _ \ 
+| |\  |  __/ |_  | | | | | |  _| (_) |
+|_| \_|\___|\__| |_| |_| |_|_|  \___/ 
+EOF
+  printf "%s" "$reset"
+  echo "${pink}Simple Network Information for MacOS${reset}"
+}
+
+# trims long values so they dont wrap
+trim_value() {
+  local value="$1"
+  local cols
+  local max
+
+  cols=$(tput cols)
+  max=$((cols - 33))
+
+  [ "$max" -lt 10 ] && max=10
+
+  if [ "${#value}" -gt "$max" ]; then
+    printf "%s..." "${value:0:$((max - 3))}"
+  else
+    printf "%s" "$value"
+  fi
+}
+
+# formats aligned output
+format_line() {
+  local label="$1"
+  local value="$2"
+  local trimmed
+
+  trimmed=$(trim_value "$value")
+  printf "%-28s : %s\n" "$label" "$trimmed"
+}
+
+# finds the active network interface
+load_active_interface() {
+  active_name=""
+  active_dev=""
+  active_ip=""
+  active_ipv6=""
+  active_mac=""
+  active_mask=""
+  active_router=""
+  active_dns=""
+  active_dhcp_enabled=""
+  active_dhcp_server=""
+
+  while IFS="|" read -r port dev; do
+    [ -z "$dev" ] && continue
+
+    # get ipv4 address for interface
+    ip=$(/usr/sbin/ipconfig getifaddr "$dev" 2>/dev/null)
+    if [ -n "$ip" ]; then
+      active_name="$port"
+      active_dev="$dev"
+      active_ip="$ip"
+
+      # get ipv6 (ignore link-local)
+      active_ipv6=$(ifconfig "$dev" 2>/dev/null | awk '/inet6 / && $2 !~ /^fe80:/ {print $2; exit}')
+
+      # get mac address
+      active_mac=$(ifconfig "$dev" 2>/dev/null | awk '/ether / {print $2; exit}')
+
+      # subnet mask from dhcp
+      active_mask=$(/usr/sbin/ipconfig getoption "$dev" subnet_mask 2>/dev/null)
+
+      # default gateway
+      active_router=$(/usr/sbin/ipconfig getoption "$dev" router 2>/dev/null)
+
+      # dns servers
+      dns_raw=$(/usr/sbin/networksetup -getdnsservers "$port" 2>/dev/null)
+      if echo "$dns_raw" | grep -q "^There"; then
+        active_dns="(none explicitly set)"
+      else
+        active_dns=$(echo "$dns_raw" | paste -sd " " -)
+      fi
+
+      # dhcp info
+      dhcp_packet=$(/usr/sbin/ipconfig getpacket "$dev" 2>/dev/null)
+      if [ -n "$dhcp_packet" ]; then
+        active_dhcp_enabled="Yes"
+        active_dhcp_server=$(echo "$dhcp_packet" | awk '/server_identifier/ {print $3; exit}')
+      else
+        active_dhcp_enabled="No"
+        active_dhcp_server="N/A"
+      fi
+
+      return
+    fi
+  done < <(
+    /usr/sbin/networksetup -listallhardwareports | awk '
+      /Hardware Port:/ {
+        port = $0
+        sub("Hardware Port: ", "", port)
+      }
+      /Device:/ {
+        dev = $2
+        print port "|" dev
+      }
+    '
+  )
+}
+
+draw_active_interface() {
+  load_active_interface
+
+  if [ -n "$active_dev" ]; then
+    echo
+    echo "${cyan}${bold}Default Interface : ${active_name} (${active_dev})${reset}"
+    echo
+
+    # network details
+    format_line "IPv4 Address" "${active_ip:-N/A}"         # local ip
+    format_line "Subnet Mask" "${active_mask:-N/A}"        # network range
+    format_line "Default Gateway" "${active_router:-N/A}"  # router ip
+    format_line "DNS Servers" "${active_dns:-N/A}"         # name resolution
+    format_line "MAC Address" "${active_mac:-N/A}"         # hardware id
+    format_line "IPv6 Address" "${active_ipv6:-N/A}"       # ipv6 address
+    format_line "DHCP Enabled" "${active_dhcp_enabled:-N/A}" # auto config
+    format_line "DHCP Server" "${active_dhcp_server:-N/A}" # dhcp source
+    echo
+  else
+    echo
+    echo "${white}No active interfaces detected${reset}"
+    echo
+  fi
+}
+
+draw_menu() {
+  local row=19
+  local mode="$1"
+  local items_ref=()
+  local i
+
+  if [ "$mode" = "main" ]; then
+    items_ref=("${main_menu_items[@]}")
+  else
+    items_ref=("${tools_menu_items[@]}")
+  fi
+
+  for i in "${!items_ref[@]}"; do
+    tput cup $((row + i)) 0
+    tput el
+    if [ "$i" -eq "$selected" ]; then
+      printf "%b" "${pink}> ${items_ref[$i]}${reset}"
+    else
+      printf "%b" "${white}  ${items_ref[$i]}${reset}"
+    fi
+  done
+
+  tput cup $((row + ${#items_ref[@]} + 1)) 0
+  tput el
+  printf "%b" "${dim}↑ ↓ arrows or press a number and Enter${reset}"
+}
+
+update_menu_selection() {
+  local row=19
+  local mode="$1"
+  local old_selected="$2"
+  local new_selected="$3"
+  local items_ref=()
+
+  if [ "$mode" = "main" ]; then
+    items_ref=("${main_menu_items[@]}")
+  else
+    items_ref=("${tools_menu_items[@]}")
+  fi
+
+  tput cup $((row + old_selected)) 0
+  tput el
+  printf "%b" "${white}  ${items_ref[$old_selected]}${reset}"
+
+  tput cup $((row + new_selected)) 0
+  tput el
+  printf "%b" "${pink}> ${items_ref[$new_selected]}${reset}"
+}
+
+# flushes dns cache
+tool_flush_dns() {
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Flush DNS${reset}"
+  echo
+
+  sudo dscacheutil -flushcache
+  sudo killall -HUP mDNSResponder
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
+# renews dhcp lease
+tool_renew_dhcp() {
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Renew DHCP${reset}"
+  echo
+
+  load_active_interface
+  sudo ipconfig set "$active_dev" DHCP
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
+# gets public ip from internet
+tool_show_public_ip() {
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Show Public IP${reset}"
+  echo
+
+  curl -s ifconfig.me
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
+# pings default gateway
+tool_ping_gateway() {
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Ping Default Gateway${reset}"
+  echo
+
+  load_active_interface
+  ping -c 4 "$active_router"
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
+# resets basic network state
+tool_reset_network() {
+  clear
+  draw_header
+  echo
+  echo "${purple}${bold}Reset Network Settings${reset}"
+  echo
+
+  load_active_interface
+
+  sudo dscacheutil -flushcache
+  sudo killall -HUP mDNSResponder
+  sudo ipconfig set "$active_dev" DHCP
+
+  echo
+  echo "${dim}Press any key to go back${reset}"
+  read -rsn1
+}
+
+read_key() {
+  IFS= read -rsn1 key
+
+  case "$key" in
+    $'\x1b')
+      IFS= read -rsn2 rest
+      case "$rest" in
+        "[A") echo up ;;
+        "[B") echo down ;;
+      esac
+      ;;
+    $'\n'|$'\r'|'')
+      echo enter
+      ;;
+    [1-6]) echo "$key" ;;
+  esac
+}
+
+redraw_home() {
+  draw_header
+  draw_active_interface
+  draw_menu main
+}
+
+tools_loop() {
+  selected=0
+  draw_header
+  draw_active_interface
+  draw_menu tools
+
+  while true; do
+    action=$(read_key)
+
+    case "$action" in
+      up)
+        old_selected=$selected
+        selected=$((selected - 1))
+        [ $selected -lt 0 ] && selected=$((${#tools_menu_items[@]} - 1))
+        update_menu_selection tools "$old_selected" "$selected"
+        ;;
+      down)
+        old_selected=$selected
+        selected=$((selected + 1))
+        [ $selected -ge ${#tools_menu_items[@]} ] && selected=0
+        update_menu_selection tools "$old_selected" "$selected"
+        ;;
+      enter)
+        case "$selected" in
+          0) tool_flush_dns ;;
+          1) tool_renew_dhcp ;;
+          2) tool_show_public_ip ;;
+          3) tool_ping_gateway ;;
+          4) tool_reset_network ;;
+          5) return ;;
+        esac
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      1)
+        tool_flush_dns
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      2)
+        tool_renew_dhcp
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      3)
+        tool_show_public_ip
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      4)
+        tool_ping_gateway
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      5)
+        tool_reset_network
+        draw_header
+        draw_active_interface
+        draw_menu tools
+        ;;
+      6)
+        return
+        ;;
+    esac
+  done
+}
+
+main_loop() {
+  redraw_home
+
+  while true; do
+    action=$(read_key)
+
+    case "$action" in
+      up)
+        old_selected=$selected
+        selected=$((selected - 1))
+        [ $selected -lt 0 ] && selected=$((${#main_menu_items[@]} - 1))
+        update_menu_selection main "$old_selected" "$selected"
+        ;;
+      down)
+        old_selected=$selected
+        selected=$((selected + 1))
+        [ $selected -ge ${#main_menu_items[@]} ] && selected=0
+        update_menu_selection main "$old_selected" "$selected"
+        ;;
+      enter)
+        case "$selected" in
+          0) draw_inactive_ports; redraw_home ;;
+          1) run_speedtest; redraw_home ;;
+          2) tools_loop; redraw_home ;;
+          3) break ;;
+        esac
+        ;;
+      1)
+        draw_inactive_ports
+        redraw_home
+        ;;
+      2)
+        run_speedtest
+        redraw_home
+        ;;
+      3)
+        tools_loop
+        redraw_home
+        ;;
+      4)
+        break
+        ;;
+    esac
+  done
+}
+
+init_ui
+main_loop
