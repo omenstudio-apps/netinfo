@@ -1,6 +1,6 @@
 ![netinfo screenshot](screenshotEx.png)
 
-       =====================================================  
+=================================================================================
 
 A clean and simple macOS network diagnostic tool for quickly viewing interface details and running basic tests
 - Built-in speed test (ping, download, upload)
