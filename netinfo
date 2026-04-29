@@ -113,7 +113,6 @@ load_active_interface() {
   while IFS="|" read -r port dev; do
     [ -z "$dev" ] && continue
 
-    # get ipv4 address for interface
     ip=$(/usr/sbin/ipconfig getifaddr "$dev" 2>/dev/null)
     if [ -n "$ip" ]; then
       active_name="$port"
@@ -172,7 +171,6 @@ draw_active_interface() {
     echo "${cyan}${bold}Default Interface : ${active_name} (${active_dev})${reset}"
     echo
 
-    # network details
     format_line "IPv4 Address" "${active_ip:-N/A}"
     format_line "Subnet Mask" "${active_mask:-N/A}"
     format_line "Default Gateway" "${active_router:-N/A}"
@@ -492,6 +490,41 @@ tool_reset_network() {
   read -rsn1
 }
 
+# maps cmd string to actino 
+run_pipe_command() {
+  local cmd="$1"
+  draw_header
+  echo
+  case "$cmd" in
+    inactive|"inactive ports"|1)   draw_inactive_ports ;;
+    speedtest|speed|2)             run_speedtest ;;
+    "flush dns"|flushdns)          tool_flush_dns ;;
+    "renew dhcp"|renewdhcp)        tool_renew_dhcp ;;
+    "public ip"|publicip|ip)       tool_show_public_ip ;;
+    "ping gateway"|pinggateway)    tool_ping_gateway ;;
+    "reset network"|resetnetwork)  tool_reset_network ;;
+    info|status|"")
+      load_active_interface
+      draw_active_interface
+      ;;
+    *)
+      echo "${white}Unknown command: ${cmd}${reset}"
+      echo
+      echo "${white}Available commands:${reset}"
+      echo "  info             - show active interface info (default)"
+      echo "  inactive         - view inactive ports"
+      echo "  speedtest        - run speed test"
+      echo "  flush dns        - flush DNS cache"
+      echo "  renew dhcp       - renew DHCP lease"
+      echo "  public ip        - show public IP"
+      echo "  ping gateway     - ping default gateway"
+      echo "  reset network    - reset network settings"
+      echo
+      exit 1
+      ;;
+  esac
+}
+
 read_key() {
   IFS= read -rsn1 key
 
@@ -646,6 +679,12 @@ main_loop() {
     esac
   done
 }
+
+if [ ! -t 0 ]; then
+  IFS= read -r piped_cmd
+  run_pipe_command "$piped_cmd"
+  exit 0
+fi
 
 init_ui
 main_loop
